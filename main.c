@@ -64,7 +64,16 @@ queue SPITXBuf;
 
 // Transfer one byte over SPI
 void SPITransmit(uint8_t out) {
-	// Place holder
+	if (!QueueInsert(&SPITXBuf, out)) {
+		// Handle Queue overflow
+		__disable_interrupt();
+		for (;;); // This is here to intentionally break the code
+	}
+
+	// Turn the transmit interrupt back on
+	if(QueueSize(&SPITXBuf) == 1) {
+		IE2 |= UCB0TXIE;
+	}
 }
 
 // Transfer one byte over UART
@@ -104,12 +113,37 @@ void InitUART() {
 
 	// Enable
 	UCA0CTL1 &= ~UCSWRST;
+}
 
+// Initilize SPI Master on UCB0
+// SPI P1.6 MISO, P1.7 MOSI, P1.5 CLK
+// Uses UARTx on pins ...
+void InitSPI() {
+	// Disable USCI
+	UCB0CTL1 |= UCSWRST;
 
+	// Set up pin functions and Directions
+	P1SEL |= BIT5| BIT6 | BIT7;
+	P1SEL2 |= BIT5| BIT6 | BIT7;
+	P1DIR |= BIT5 | BIT7;			// P1.5, P1.7 Out
+	P1DIR &= ~BIT6;					// P1.6 In
+
+	// Set mode and clock select
+	UCB0CTL0 = UCMSB | UCMST | UCSYNC;
+	UCB0CTL1 = UCSSEL_3 | UCSWRST;
+
+	// Set clock divider to 255
+	UCB0BR0 = 0xFF;
+	UCB0BR1 = 0x0;
+
+	// Turn on USCI in SPI mode
+	UCB0CTL1 &= ~UCSWRST;
 }
 
 #pragma vector=USCIAB0TX_VECTOR
 __interrupt void TXISR() {
+
+	// UART
 	uint8_t out = 0;
 	if(QueuePop(&UARTTXBuf, &out)) {
 		UCA0TXBUF = out;
@@ -118,11 +152,31 @@ __interrupt void TXISR() {
 		// Done transfering disable transmit interrupt
 		IE2 &= ~UCA0TXIE;
 	}
+
+	// SPI
+	out = 0;
+	if(QueuePop(&SPITXBuf, &out)) {
+		UCB0TXBUF = out;
+	}
+	else {
+		// Done transfering disable transmit interrupt
+		IE2 &= ~UCB0TXIE;
+	}
+
 }
 
 #pragma vector=USCIAB0RX_VECTOR
 __interrupt void RXISR() {
-	UARTTransmit(UCA0RXBUF);
+	// UART
+	if(IFG2 & UCB0RXIFG) {
+		UARTTransmit(UCB0RXBUF);
+	}
+
+	// SPI
+	if (IFG2 & UCA0RXIFG) {
+		SPITransmit(UCA0RXBUF);
+	}
+
 }
 
 /*
@@ -135,12 +189,13 @@ int main(void) {
 	DCOCTL |= DCO2 | DCO1 | DCO0;
 	BCSCTL1 |= RSEL3 | RSEL2 | RSEL1 | RSEL0;
 
-	// Initilize UART
+	// Initilize communications
 	InitUART();
+	InitSPI();
 
 	// Enable interrupts
 	__enable_interrupt();
-	IE2 = UCA0TXIE | UCA0RXIE;
+	IE2 = UCA0TXIE | UCA0RXIE | UCB0TXIE | UCB0RXIE;
 
 	//while(!(IFG2 & UCA0RXIFG));
 
